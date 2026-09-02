@@ -1,0 +1,55 @@
+{
+  "name": "cryptojs-node-polyfill",
+  "version": "0.1.0",
+  "description": "跨端 Crypto polyfill + CryptoJS 加密封装工具层：为小程序/App/Apple 等缺少 Web Crypto 的环境补齐 getRandomValues/randomUUID/randomBytes，并提供 AES/摘要/HMAC/编码/RSA 一键调用",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node --test",
+    "prepublishOnly": "npm run build"
+  },
+  "engines": {
+    "node": ">=14.18.0"
+  },
+  "keywords": [
+    "polyfill",
+    "crypto",
+    "webcrypto",
+    "getRandomValues",
+    "randomUUID",
+    "randomBytes",
+    "crypto-js",
+    "cryptojs",
+    "aes",
+    "sha256",
+    "hmac",
+    "base64",
+    "rsa",
+    "小程序",
+    "wechat",
+    "react-native",
+    "apple",
+    "safari",
+    "node"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "crypto-js": "^4.2.0"
+  },
+  "devDependencies": {
+    "@types/crypto-js": "^4.2.2",
+    "@types/node": "^26.3.0",
+    "typescript": "^5.9.3"
+  }
+}
