@@ -69,13 +69,27 @@ type EncodeSource = 'utf8' | 'hex' | 'base64';
 
 /** 将字符串按指定编码解析为 CryptoJS WordArray。 */
 function parseWordArray(input: string, encoding: EncodeSource): CryptoJS.lib.WordArray {
+  if (typeof input !== 'string') throw new TypeError('input 必须是字符串');
   if (encoding === 'hex') {
+    if (input.length % 2 !== 0 || !/^[0-9a-f]*$/i.test(input)) {
+      throw new TypeError('无效的 Hex 编码');
+    }
     return enc.Hex.parse(input);
   }
   if (encoding === 'base64') {
-    return enc.Base64.parse(input);
+    if (!/^[A-Za-z0-9+/]*={0,2}$/.test(input) || input.length % 4 === 1 ||
+      (input.includes('=') && input.length % 4 !== 0)) {
+      throw new TypeError('无效的 Base64 编码');
+    }
+    const parsed = enc.Base64.parse(input);
+    // 接受省略末尾 padding 的标准 Base64，但不接受非法尾位或静默截断。
+    if (enc.Base64.stringify(parsed).replace(/=+$/, '') !== input.replace(/=+$/, '')) {
+      throw new TypeError('无效的 Base64 编码');
+    }
+    return parsed;
   }
-  return enc.Utf8.parse(input);
+  if (encoding === 'utf8') return enc.Utf8.parse(input);
+  throw new TypeError('encoding 必须是 utf8、hex 或 base64');
 }
 
 /** 将 WordArray 按指定编码输出为字符串。 */
@@ -90,7 +104,7 @@ export function bytesToBase64(bytes: Uint8Array): string {
 
 /** Base64 字符串解码为原始字节。 */
 export function base64ToBytes(input: string): Uint8Array {
-  return wordArrayToBytes(enc.Base64.parse(input));
+  return wordArrayToBytes(parseWordArray(input, 'base64'));
 }
 
 /** 字节数组转小写十六进制字符串。 */
@@ -100,7 +114,7 @@ export function bytesToHex(bytes: Uint8Array): string {
 
 /** 十六进制字符串解码为原始字节。 */
 export function hexToBytes(input: string): Uint8Array {
-  return wordArrayToBytes(enc.Hex.parse(input));
+  return wordArrayToBytes(parseWordArray(input, 'hex'));
 }
 
 /** Base64 编码（输入可为字符串或字节，输出 Base64 字符串）。 */
@@ -110,7 +124,7 @@ export function base64Encode(input: string | Uint8Array): string {
 
 /** Base64 解码（输入 Base64 字符串，输出 UTF-8 字符串）。 */
 export function base64Decode(input: string): string {
-  return enc.Utf8.stringify(enc.Base64.parse(input));
+  return enc.Utf8.stringify(parseWordArray(input, 'base64'));
 }
 
 /** Hex 编码（输入可为字符串或字节，输出小写十六进制字符串）。 */
@@ -153,7 +167,9 @@ export interface AesOptions {
 
 /** 校验并解析加密模式。 */
 function resolveBlockMode(mode: 'CBC' | 'ECB'): typeof CryptoJS.mode.CBC {
-  return mode === 'ECB' ? CryptoJS.mode.ECB : CryptoJS.mode.CBC;
+  if (mode === 'ECB') return CryptoJS.mode.ECB;
+  if (mode === 'CBC') return CryptoJS.mode.CBC;
+  throw new TypeError('AES mode 必须是 CBC 或 ECB');
 }
 
 /** 合法的 AES 密钥字节长度。 */
@@ -181,10 +197,16 @@ function assertValidAesIv(ivWa: CryptoJS.lib.WordArray): void {
  * - CBC 模式必须有 iv（依据 ivEncoding 解析）且为 16 字节；ECB 忽略 iv；
  * - 使用 PKCS#7 填充，输出为 Base64（默认）或 Hex。
  */
-export function aesEncrypt(plainText: string, key: string, options?: AesOptions): string {
+function buildAesOptions(key: string, options?: AesOptions) {
   const { mode = 'CBC', keyEncoding = 'utf8', ivEncoding = 'utf8', output = 'base64' } =
     options ?? {};
-
+  const blockMode = resolveBlockMode(mode);
+  if (output !== 'base64' && output !== 'hex') {
+    throw new TypeError('AES output 必须是 base64 或 hex');
+  }
+  if (!['utf8', 'hex', 'base64'].includes(ivEncoding)) {
+    throw new TypeError('ivEncoding 必须是 utf8、hex 或 base64');
+  }
   const keyWa = parseWordArray(key, keyEncoding);
   assertValidAesKey(keyWa);
 
@@ -197,11 +219,14 @@ export function aesEncrypt(plainText: string, key: string, options?: AesOptions)
     ivWa = parseWordArray(options.iv, ivEncoding);
     assertValidAesIv(ivWa);
   }
+  return { keyWa, output, config: { mode: blockMode, padding: pad.Pkcs7, iv: ivWa } };
+}
 
+/** AES 原始密钥加密，默认 CBC / PKCS#7 / Base64。 */
+export function aesEncrypt(plainText: string, key: string, options?: AesOptions): string {
+  const { keyWa, output, config } = buildAesOptions(key, options);
   const cipherParams = AES.encrypt(enc.Utf8.parse(plainText), keyWa, {
-    mode: resolveBlockMode(mode),
-    padding: pad.Pkcs7,
-    iv: ivWa,
+    ...config,
   });
 
   return formatWordArray(cipherParams.ciphertext, output);
@@ -216,36 +241,29 @@ export function aesDecrypt(
   key: string,
   options?: AesOptions,
 ): string {
-  const { mode = 'CBC', keyEncoding = 'utf8', ivEncoding = 'utf8', output = 'base64' } =
-    options ?? {};
-
-  const keyWa = parseWordArray(key, keyEncoding);
-  assertValidAesKey(keyWa);
-
-  const isCbc = mode === 'CBC';
-  let ivWa: CryptoJS.lib.WordArray | undefined;
-  if (isCbc) {
-    if (options?.iv === undefined || options.iv === '') {
-      throw new TypeError('AES-CBC 模式必须提供 iv');
-    }
-    ivWa = parseWordArray(options.iv, ivEncoding);
-    assertValidAesIv(ivWa);
+  const { keyWa, output, config } = buildAesOptions(key, options);
+  const ciphertextWa = parseWordArray(cipherText, output);
+  if (ciphertextWa.sigBytes === 0 || ciphertextWa.sigBytes % 16 !== 0) {
+    throw new TypeError('AES 密文必须是非空的完整 16 字节分组');
   }
-
-  const ciphertextWa =
-    output === 'hex' ? enc.Hex.parse(cipherText) : enc.Base64.parse(cipherText);
-
-  const bytes = AES.decrypt(
+  // CryptoJS 的 Pkcs7.unpad 只读最后一个字节，不校验实际填充，需自行严格校验。
+  const plain = AES.decrypt(
     CryptoJS.lib.CipherParams.create({ ciphertext: ciphertextWa }),
     keyWa,
     {
-      mode: resolveBlockMode(mode),
-      padding: pad.Pkcs7,
-      iv: ivWa,
+      ...config,
+      padding: pad.NoPadding,
     },
   );
 
-  return enc.Utf8.stringify(bytes);
+  const bytes = wordArrayToBytes(plain);
+  const paddingLength = bytes[bytes.length - 1];
+  let invalidPadding = paddingLength < 1 || paddingLength > 16;
+  for (let i = 1; i <= 16; i += 1) {
+    if (i <= paddingLength && bytes[bytes.length - i] !== paddingLength) invalidPadding = true;
+  }
+  if (invalidPadding) throw new Error('AES 密文或 PKCS#7 填充无效');
+  return bytesToUtf8(bytes.subarray(0, bytes.length - paddingLength));
 }
 
 // ---------------------------------------------------------------------------
@@ -259,7 +277,7 @@ export type RsaPadding = 'pkcs1' | 'oaep';
 
 /** RSA 加解密配置项。 */
 export interface RsaOptions {
-  /** 填充方式，默认 'pkcs1'；OAEP 更安全。 */
+  /** 填充方式，默认 'oaep'；'pkcs1' 仅用于明确要求该格式的旧系统。 */
   padding?: RsaPadding;
   /** OAEP 哈希算法，默认 'sha256'。 */
   oaepHash?: string;
@@ -271,12 +289,13 @@ function resolveRsaPadding(padding: RsaPadding): number {
   if (padding === 'oaep') {
     return constants?.RSA_PKCS1_OAEP_PADDING ?? 4;
   }
-  return constants?.RSA_PKCS1_PADDING ?? 1;
+  if (padding === 'pkcs1') return constants?.RSA_PKCS1_PADDING ?? 1;
+  throw new TypeError('RSA padding 必须是 oaep 或 pkcs1');
 }
 
 /** 组装 Node 加解密参数：oaepHash 仅在 OAEP 填充下有意义，避免冗余传参。 */
 function buildRsaCipherOptions(key: string, options?: RsaOptions): Record<string, unknown> {
-  const { padding = 'pkcs1', oaepHash = 'sha256' } = options ?? {};
+  const { padding = 'oaep', oaepHash = 'sha256' } = options ?? {};
   const nodeOptions: Record<string, unknown> = {
     key,
     padding: resolveRsaPadding(padding),
@@ -304,7 +323,7 @@ export function rsaEncrypt(
     buildRsaCipherOptions(publicKey, options),
     utf8ToBytes(plainText),
   );
-  return BufferToString(encrypted).toString('base64');
+  return bytesToBase64(encrypted);
 }
 
 /**
@@ -322,23 +341,7 @@ export function rsaDecrypt(
   }
   const decrypted = nodeCrypto.privateDecrypt(
     buildRsaCipherOptions(privateKey, options),
-    BufferFromBase64(cipherBase64),
+    base64ToBytes(cipherBase64),
   );
   return bytesToUtf8(decrypted);
-}
-
-/** Node Buffer：确保加密输出为 Buffer，避免 Uint8Array 不具 toString('base64') 的问题。 */
-function BufferToString(value: Uint8Array): { toString(enc: 'base64'): string } {
-  // Node 的 publicEncrypt 返回 Buffer，自带 base64 toString
-  return value as { toString(enc: 'base64'): string };
-}
-
-/** Node Buffer：按 base64 解析输入密文。 */
-function BufferFromBase64(input: string): Uint8Array {
-  const buf = typeof Buffer !== 'undefined' ? Buffer.from(input, 'base64') : null;
-  if (buf) {
-    return new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
-  }
-  // 浏览器兜底：base64 -> WordArray -> bytes
-  return wordArrayToBytes(CryptoJS.enc.Base64.parse(input));
 }

@@ -4,7 +4,11 @@
  */
 
 type NodeCryptoModule = {
-  randomBytes?: (size: number) => Uint8Array;
+  randomBytes?: {
+    (size: number): Uint8Array;
+    (size: number, callback: (err: Error | null, bytes: Uint8Array) => void): void;
+  };
+  randomFillSync?: (bytes: Uint8Array) => Uint8Array;
   publicEncrypt?: (
     options: unknown,
     buffer: ArrayBuffer | Uint8Array,

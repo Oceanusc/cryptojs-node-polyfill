@@ -13,15 +13,16 @@ const { SHA256 } = CryptoJS;
 const OUTLEN = 32; // 哈希输出字节数（SHA-256 = 256 bit）
 const SEEDLEN = 55; // 状态字节数（440 bit，与 SHA-256 安全强度对应）
 const MAX_BITS_PER_REQUEST = 2 ** 19; // 单次生成上限：2^19 bit = 2^16 字节
+const RESEED_INTERVAL = 2 ** 48;
 
 const PERSONALIZATION = 'cryptojs-node-polyfill.hash-drbg.v1';
 
 /**
  * 基于 CryptoJS.SHA256 的 NIST Hash_DRBG 随机数生成器。
  *
- * 状态 = V(55B) + C(55B) + reseed_counter，严格遵循 SP 800-90A 的
- * Instantiate / Generate(中间无带附加输入的经典单输出路径)，无 reseed 支持。
- * 底层借助 CryptoJS 的 WordArray/SHA256 完成哈希运算，体现"参考 crypto-js"的意图。
+ * 实现 SP 800-90A 的 Instantiate / Generate（不含附加输入），不代表通过 NIST 认证。
+ * 显式 seed 为完整 seed_material，仅用于可复现序列；安全性由调用方的熵输入决定。
+ * 不支持 reseed，达到 2^48 次请求后必须从新的安全熵创建实例。
  */
 export class CryptoRng {
   private V: Uint8Array;
@@ -32,12 +33,14 @@ export class CryptoRng {
     // 实例化：seed_material = entropy || nonce || personalization（无显式 seed 时）
     // 显式 seed 场景为确定性可复现，避免额外引入随机 nonce，便于测试断言。
     let seedMaterial: Uint8Array;
-    if (seed) {
-      seedMaterial = padOrSlice(seed, SEEDLEN);
+    if (seed !== undefined) {
+      bytesToWordArray(seed);
+      if (seed.length === 0) throw new TypeError('seed 不能为空');
+      seedMaterial = seed;
     } else {
       seedMaterial = concatBytes(
         concatBytes(
-          padOrSlice(collectEntropy(SEEDLEN), SEEDLEN),
+          collectEntropy(SEEDLEN),
           collectEntropy(32), // nonce
         ),
         utf8ToBytes(PERSONALIZATION),
@@ -60,6 +63,9 @@ export class CryptoRng {
     const maxBytes = MAX_BITS_PER_REQUEST / 8;
     if (length > maxBytes) {
       throw new RangeError(`单次生成最多 ${maxBytes} 字节`);
+    }
+    if (this.reseedCounter > RESEED_INTERVAL) {
+      throw new Error('Hash_DRBG 需要重新播种；请从新的安全熵创建 CryptoRng 实例');
     }
 
     // W = Hashgen(requested_bytes, V)
@@ -88,8 +94,8 @@ function hashDF(bytesNeeded: number, input: Uint8Array): Uint8Array {
   let written = 0;
 
   for (let i = 1; i <= m; i += 1) {
-    // counter(4B BE) || L(4B BE) || input
-    const counter = uint32BE(i);
+    // SP 800-90A §10.3.1：counter 是 1 字节；仅输出位数 L 为 4 字节。
+    const counter = Uint8Array.of(i);
     const block = wordArrayToBytes(
       SHA256(bytesToWordArray(concatBytes(concatBytes(counter, L), input))),
     );
@@ -116,25 +122,14 @@ function hashgen(bytesNeeded: number, dataInput: Uint8Array): Uint8Array {
   return out;
 }
 
-/** 截取或交叉补齐为固定长度（短则补零，多则取左端）。 */
-function padOrSlice(input: Uint8Array, length: number): Uint8Array {
-  const fixed = new Uint8Array(length);
-  // 空输入无熵可补，直接返回全零，避免取模零导致的 NaN 索引
-  if (input.length === 0) {
-    return fixed;
-  }
-  // 若输入不足，以异或/补位方式尽量保留更多熵
-  const n = Math.min(input.length, length);
-  fixed.set(input.subarray(0, n));
-  for (let i = n; i < length; i += 1) {
-    fixed[i] = input[i % input.length] ^ 0x36;
-  }
-  return fixed;
-}
-
 /** 把计数器编码为大端序字节（右侧对齐，代表最不显著部分）。 */
 function counterBytes(value: number): Uint8Array {
-  return uint32BE(value);
+  const out = new Uint8Array(7);
+  for (let i = out.length - 1; i >= 0; i -= 1) {
+    out[i] = value % 256;
+    value = Math.floor(value / 256);
+  }
+  return out;
 }
 
 /** 32 位大端序编码。 */
